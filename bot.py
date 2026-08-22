@@ -4,47 +4,66 @@ import csv
 import io
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import sqlite3
+import psycopg2
+import psycopg2.extras
 from datetime import datetime
 
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/your_channel")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # ваш Telegram ID
-DB_FILE = "/tmp/leads.db"   # временная папка на Render
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # --- Логирование ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Работа с базой данных ---
+# --- Работа с базой данных PostgreSQL ---
+def get_conn():
+    """Возвращает соединение с базой данных."""
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS leads
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  manager_code TEXT,
-                  user_id INTEGER,
-                  username TEXT,
-                  first_name TEXT,
-                  last_name TEXT,
-                  timestamp TEXT)''')
-    conn.commit()
-    conn.close()
+    """Создаёт таблицу, если её нет."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS leads (
+                    id SERIAL PRIMARY KEY,
+                    manager_code TEXT,
+                    user_id BIGINT,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    timestamp TEXT
+                )
+            ''')
+        conn.commit()
 
 def add_lead(manager_code, user_id, username, first_name, last_name):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
+    """Добавляет нового лида в базу."""
     timestamp = datetime.now().isoformat()
-    c.execute("INSERT INTO leads (manager_code, user_id, username, first_name, last_name, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-              (manager_code, user_id, username, first_name, last_name, timestamp))
-    conn.commit()
-    conn.close()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO leads (manager_code, user_id, username, first_name, last_name, timestamp) VALUES (%s, %s, %s, %s, %s, %s)",
+                (manager_code, user_id, username, first_name, last_name, timestamp)
+            )
+        conn.commit()
     logger.info(f"Новый лид: manager={manager_code}, user_id={user_id}, username={username}")
+
+def update_username(user_id, manager_code, username):
+    """Обновляет username, если он был не указан при первом заходе."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE leads SET username = %s WHERE user_id = %s AND manager_code = %s AND username IS NULL",
+                (username, user_id, manager_code)
+            )
+        conn.commit()
 
 # --- Функция уведомления администратора ---
 async def notify_admin(bot, manager_code, user):
-    """Отправляет уведомление администратору о новом лиде"""
     if ADMIN_ID:
         await bot.send_message(
             chat_id=ADMIN_ID,
@@ -67,7 +86,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_name=user.last_name
     )
     
-    # Уведомляем администратора
     await notify_admin(context.bot, manager_code, user)
     
     await update.message.reply_text(
@@ -94,12 +112,7 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         manager_code = context.user_data.get('manager_code', 'unknown')
         
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("UPDATE leads SET username=? WHERE user_id=? AND manager_code=? AND username IS NULL",
-                  (username, user.id, manager_code))
-        conn.commit()
-        conn.close()
+        update_username(user.id, manager_code, username)
         
         await update.message.reply_text(f"Отлично! Ваш username @{username} сохранён.")
         await send_channel_invite(update, context)
@@ -116,32 +129,24 @@ async def send_channel_invite(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает команды /export и /export leads"""
     user = update.effective_user
     if user.id != ADMIN_ID:
         await update.message.reply_text("У вас нет доступа к этой команде.")
         return
 
-    # Если передан аргумент leads, выводим текстовый отчёт
     if context.args and context.args[0] == "leads":
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT manager_code, username FROM leads ORDER BY manager_code, timestamp")
-        rows = c.fetchall()
-        conn.close()
-
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute("SELECT manager_code, username FROM leads ORDER BY manager_code, timestamp")
+                rows = cur.fetchall()
         if not rows:
             await update.message.reply_text("Пока нет лидов.")
             return
-
-        # Группируем по менеджеру
         managers = {}
-        for manager, username in rows:
-            if manager not in managers:
-                managers[manager] = []
-            managers[manager].append(username if username else "не указан")
-
-        # Формируем текст отчёта
+        for row in rows:
+            manager = row['manager_code']
+            username = row['username'] if row['username'] else "не указан"
+            managers.setdefault(manager, []).append(username)
         text = "📊 Отчёт по лидам:\n\n"
         for manager, usernames in managers.items():
             text += f"Менеджер: {manager}\n"
@@ -150,12 +155,10 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"Юзернеймы: {usernames_str}\n\n"
         await update.message.reply_text(text)
     else:
-        # Старое поведение: отправка CSV-файла
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT manager_code, user_id, username, first_name, last_name, timestamp FROM leads ORDER BY id DESC")
-        rows = c.fetchall()
-        conn.close()
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute("SELECT manager_code, user_id, username, first_name, last_name, timestamp FROM leads ORDER BY id DESC")
+                rows = cur.fetchall()
         if not rows:
             await update.message.reply_text("Пока нет ни одного лида.")
             return
@@ -163,7 +166,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         writer = csv.writer(output)
         writer.writerow(["Менеджер", "User ID", "Username", "Имя", "Фамилия", "Время"])
         for row in rows:
-            writer.writerow(row)
+            writer.writerow([row['manager_code'], row['user_id'], row['username'], row['first_name'], row['last_name'], row['timestamp']])
         csv_data = output.getvalue()
         await update.message.reply_document(
             document=io.BytesIO(csv_data.encode('utf-8-sig')),
