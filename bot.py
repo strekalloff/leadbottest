@@ -54,6 +54,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         first_name=user.first_name,
         last_name=user.last_name
     )
+
+async def notify_admin(bot, manager_code, user):
+    """Отправляет уведомление администратору о новом лиде"""
+    if ADMIN_ID:
+        await bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"🔔 Новый лид!\n"
+                 f"Менеджер: {manager_code}\n"
+                 f"Имя: {user.first_name}\n"
+                 f"Username: @{user.username if user.username else 'не указан'}"
+        )
     
     await update.message.reply_text(
         f"Привет, {user.first_name}! 👋\n"
