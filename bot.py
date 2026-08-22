@@ -42,6 +42,18 @@ def add_lead(manager_code, user_id, username, first_name, last_name):
     conn.close()
     logger.info(f"Новый лид: manager={manager_code}, user_id={user_id}, username={username}")
 
+# --- Функция уведомления администратора ---
+async def notify_admin(bot, manager_code, user):
+    """Отправляет уведомление администратору о новом лиде"""
+    if ADMIN_ID:
+        await bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"🔔 Новый лид!\n"
+                 f"Менеджер: {manager_code}\n"
+                 f"Имя: {user.first_name}\n"
+                 f"Username: @{user.username if user.username else 'не указан'}"
+        )
+
 # --- Обработчики команд ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -54,17 +66,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         first_name=user.first_name,
         last_name=user.last_name
     )
-
-async def notify_admin(bot, manager_code, user):
-    """Отправляет уведомление администратору о новом лиде"""
-    if ADMIN_ID:
-        await bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"🔔 Новый лид!\n"
-                 f"Менеджер: {manager_code}\n"
-                 f"Имя: {user.first_name}\n"
-                 f"Username: @{user.username if user.username else 'не указан'}"
-        )
+    
+    # Уведомляем администратора
+    await notify_admin(context.bot, manager_code, user)
     
     await update.message.reply_text(
         f"Привет, {user.first_name}! 👋\n"
@@ -112,36 +116,60 @@ async def send_channel_invite(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет CSV со всеми лидами администратору"""
+    """Обрабатывает команды /export и /export leads"""
     user = update.effective_user
     if user.id != ADMIN_ID:
         await update.message.reply_text("У вас нет доступа к этой команде.")
         return
-    
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT manager_code, user_id, username, first_name, last_name, timestamp FROM leads ORDER BY id DESC")
-    rows = c.fetchall()
-    conn.close()
-    
-    if not rows:
-        await update.message.reply_text("Пока нет ни одного лида.")
-        return
-    
-    # Создаём CSV в памяти
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["Менеджер", "User ID", "Username", "Имя", "Фамилия", "Время"])
-    for row in rows:
-        writer.writerow(row)
-    csv_data = output.getvalue()
-    
-    # Отправляем как файл
-    await update.message.reply_document(
-        document=io.BytesIO(csv_data.encode('utf-8-sig')),
-        filename="leads.csv",
-        caption="Список лидов"
-    )
+
+    # Если передан аргумент leads, выводим текстовый отчёт
+    if context.args and context.args[0] == "leads":
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT manager_code, username FROM leads ORDER BY manager_code, timestamp")
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows:
+            await update.message.reply_text("Пока нет лидов.")
+            return
+
+        # Группируем по менеджеру
+        managers = {}
+        for manager, username in rows:
+            if manager not in managers:
+                managers[manager] = []
+            managers[manager].append(username if username else "не указан")
+
+        # Формируем текст отчёта
+        text = "📊 Отчёт по лидам:\n\n"
+        for manager, usernames in managers.items():
+            text += f"Менеджер: {manager}\n"
+            text += f"Количество лидов: {len(usernames)}\n"
+            usernames_str = ", ".join(f"@{u}" if u != "не указан" else u for u in usernames)
+            text += f"Юзернеймы: {usernames_str}\n\n"
+        await update.message.reply_text(text)
+    else:
+        # Старое поведение: отправка CSV-файла
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT manager_code, user_id, username, first_name, last_name, timestamp FROM leads ORDER BY id DESC")
+        rows = c.fetchall()
+        conn.close()
+        if not rows:
+            await update.message.reply_text("Пока нет ни одного лида.")
+            return
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Менеджер", "User ID", "Username", "Имя", "Фамилия", "Время"])
+        for row in rows:
+            writer.writerow(row)
+        csv_data = output.getvalue()
+        await update.message.reply_document(
+            document=io.BytesIO(csv_data.encode('utf-8-sig')),
+            filename="leads.csv",
+            caption="Список лидов"
+        )
 
 # --- Запуск бота ---
 def main():
