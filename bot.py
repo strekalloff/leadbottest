@@ -5,8 +5,8 @@ import sqlite3
 from datetime import datetime
 
 # --- Настройки ---
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-CHANNEL_LINK = "https://t.me/your_channel"  # публичная ссылка или invite link
+BOT_TOKEN = "8660596044:AAFlLyoMEnLk7HI8WZK_qGCI_TP1MPBCZso"
+CHANNEL_LINK = "https://t.me/ssylka0987654321"  # публичная ссылка или invite link
 DB_FILE = "leads.db"
 
 # --- Логирование ---
