@@ -3,7 +3,7 @@ import logging
 import csv
 import io
 import threading
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -22,13 +22,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/your_channel")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
-PORT = int(os.getenv("PORT", 8080))  # Render сам задаст PORT
+PORT = int(os.getenv("PORT", 8080))
 
 # --- Логирование ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Создаём Flask-приложение для health check ---
+# --- Flask для health check ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -75,20 +75,6 @@ def update_username(user_id, manager_code, username):
             )
         conn.commit()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    manager_code = context.args[0] if context.args else "unknown"
-
-    add_lead(...)
-
-    await notify_admin(context.bot, manager_code, user)
-
-    # Вот здесь происходит показ клавиатуры для администратора
-    await maybe_show_reply_keyboard(update, context)
-
-    await update.message.reply_text(...)
-    # далее остальной код
-
 # --- Вспомогательные функции для отчётов ---
 def get_all_leads():
     with get_conn() as conn:
@@ -119,6 +105,23 @@ async def notify_admin(bot, manager_code, user):
                  f"Username: @{user.username if user.username else 'не указан'}"
         )
 
+# --- Клавиатура администратора ---
+def get_admin_reply_keyboard():
+    """Создаёт reply-клавиатуру с кнопкой 'Меню'."""
+    keyboard = [[KeyboardButton("Меню")]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+async def maybe_show_reply_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает reply-клавиатуру администратору, если её ещё нет."""
+    if update.effective_user.id == ADMIN_ID:
+        if not context.user_data.get('reply_keyboard_shown'):
+            reply_keyboard = get_admin_reply_keyboard()
+            await update.message.reply_text(
+                "Клавиатура администратора активирована. Нажмите кнопку «Меню» внизу.",
+                reply_markup=reply_keyboard
+            )
+            context.user_data['reply_keyboard_shown'] = True
+
 # --- Обработчики команд ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -133,6 +136,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await notify_admin(context.bot, manager_code, user)
+
+    # Показываем reply-клавиатуру, если это админ
+    await maybe_show_reply_keyboard(update, context)
 
     await update.message.reply_text(
         f"Привет, {user.first_name}! 👋\n"
@@ -150,6 +156,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['manager_code'] = manager_code
 
 async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await maybe_show_reply_keyboard(update, context)
+
     if context.user_data.get('awaiting_username'):
         username = update.message.text.strip()
         if username.startswith('@'):
@@ -180,6 +188,9 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("У вас нет доступа.")
         return
 
+    await show_inline_menu(update, context)
+
+async def show_inline_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 Экспорт CSV", callback_data="export_csv")],
         [InlineKeyboardButton("📋 Экспорт лидов (текст)", callback_data="export_leads")],
@@ -211,6 +222,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await execute_clear(update, context)
     elif data == "cancel_clear":
         await query.edit_message_text("Операция отменена.")
+
+async def handle_reply_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == ADMIN_ID:
+        await show_inline_menu(update, context)
+    else:
+        await update.message.reply_text("У вас нет доступа.")
 
 async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     leads = get_all_leads()
@@ -311,10 +328,11 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Запускаем Flask в отдельном потоке
+    # Обработчик нажатия на reply-кнопку "Меню"
+    application.add_handler(MessageHandler(filters.Text(["Меню"]), handle_reply_menu))
+
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Запускаем long polling
     logger.info("Бот запущен")
     application.run_polling()
 
