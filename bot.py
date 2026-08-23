@@ -13,6 +13,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/your_channel")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например, https://your-service.onrender.com
+PORT = int(os.getenv("PORT", 8443))     # Render автоматически задаёт PORT
 
 # --- Логирование ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -20,11 +22,9 @@ logger = logging.getLogger(__name__)
 
 # --- Работа с базой данных PostgreSQL ---
 def get_conn():
-    """Возвращает соединение с базой данных."""
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
-    """Создаёт таблицу, если её нет."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute('''
@@ -41,7 +41,6 @@ def init_db():
         conn.commit()
 
 def add_lead(manager_code, user_id, username, first_name, last_name):
-    """Добавляет нового лида в базу."""
     timestamp = datetime.now().isoformat()
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -53,7 +52,6 @@ def add_lead(manager_code, user_id, username, first_name, last_name):
     logger.info(f"Новый лид: manager={manager_code}, user_id={user_id}, username={username}")
 
 def update_username(user_id, manager_code, username):
-    """Обновляет username, если он был не указан при первом заходе."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -174,7 +172,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption="Список лидов"
         )
 
-# --- Запуск бота ---
+# --- Запуск бота с вебхуком ---
 def main():
     init_db()
     application = Application.builder().token(BOT_TOKEN).build()
@@ -183,8 +181,13 @@ def main():
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
     
-    logger.info("Бот запущен")
-    application.run_polling()
+    # Устанавливаем вебхук и запускаем HTTP-сервер
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path="webhook",  # можно оставить по умолчанию
+        webhook_url=f"{WEBHOOK_URL}/webhook"
+    )
 
 if __name__ == "__main__":
     main()
