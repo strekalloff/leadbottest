@@ -2,6 +2,7 @@ import os
 import logging
 import csv
 import io
+import threading
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -14,16 +15,25 @@ from telegram.ext import (
 import psycopg2
 import psycopg2.extras
 from datetime import datetime
+from flask import Flask
 
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/your_channel")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
+PORT = int(os.getenv("PORT", 8080))  # Render сам задаст PORT
 
 # --- Логирование ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- Создаём Flask-приложение для health check ---
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health():
+    return 'Bot is running', 200
 
 # --- Работа с базой данных PostgreSQL ---
 def get_conn():
@@ -67,14 +77,12 @@ def update_username(user_id, manager_code, username):
 
 # --- Вспомогательные функции для отчётов ---
 def get_all_leads():
-    """Возвращает все записи из таблицы leads в виде списка словарей."""
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT manager_code, user_id, username, first_name, last_name, timestamp FROM leads ORDER BY id DESC")
             return [dict(row) for row in cur.fetchall()]
 
 def get_leads_grouped():
-    """Возвращает словарь {менеджер: [username, ...]}."""
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT manager_code, username FROM leads ORDER BY manager_code, timestamp")
@@ -260,10 +268,8 @@ async def confirm_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(warning_text, reply_markup=reply_markup)
 
 async def execute_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Отправляем backup
     await export_csv(update, context)
 
-    # Очищаем базу
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE leads RESTART IDENTITY")
@@ -274,22 +280,27 @@ async def execute_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("База данных очищена.")
 
+# --- Запуск Flask в отдельном потоке ---
+def run_flask():
+    flask_app.run(host="0.0.0.0", port=PORT)
+
 # --- Запуск бота ---
 def main():
     init_db()
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("export", admin_menu))
     application.add_handler(CommandHandler("menu", admin_menu))
 
-    # Обработчики сообщений и кнопок
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Запуск long polling
+    # Запускаем Flask в отдельном потоке
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    # Запускаем long polling
     logger.info("Бот запущен")
     application.run_polling()
 
