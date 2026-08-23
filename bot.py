@@ -20,8 +20,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/your_channel")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например, https://your-service.onrender.com
-PORT = int(os.getenv("PORT", 8443))
 
 # --- Логирование ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -156,7 +154,6 @@ async def send_channel_invite(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # --- Команды администратора ---
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает меню администратора."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("У вас нет доступа.")
         return
@@ -173,7 +170,6 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия inline-кнопок."""
     query = update.callback_query
     await query.answer()
 
@@ -195,7 +191,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Операция отменена.")
 
 async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет CSV-файл со всеми лидами."""
     leads = get_all_leads()
     if not leads:
         if update.callback_query:
@@ -212,7 +207,6 @@ async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          lead['first_name'], lead['last_name'], lead['timestamp']])
     csv_data = output.getvalue()
 
-    # Отправляем файл
     if update.callback_query:
         chat_id = update.callback_query.message.chat_id
         await update.callback_query.message.reply_document(
@@ -228,7 +222,6 @@ async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def export_leads_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет текстовый отчёт по менеджерам."""
     managers = get_leads_grouped()
     if not managers:
         if update.callback_query:
@@ -250,7 +243,6 @@ async def export_leads_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text)
 
 async def confirm_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Запрашивает подтверждение на очистку базы."""
     keyboard = [
         [InlineKeyboardButton("✅ Да, удалить", callback_data="execute_clear")],
         [InlineKeyboardButton("❌ Отмена", callback_data="cancel_clear")],
@@ -268,7 +260,6 @@ async def confirm_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(warning_text, reply_markup=reply_markup)
 
 async def execute_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сначала отправляет backup, затем очищает таблицу."""
     # Отправляем backup
     await export_csv(update, context)
 
@@ -278,7 +269,6 @@ async def execute_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("TRUNCATE TABLE leads RESTART IDENTITY")
         conn.commit()
 
-    # Сообщаем об успехе
     if update.callback_query:
         await update.callback_query.message.reply_text("База данных очищена.")
     else:
@@ -292,20 +282,16 @@ def main():
     # Команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_menu))
-    application.add_handler(CommandHandler("export", admin_menu))  # для обратной совместимости
+    application.add_handler(CommandHandler("export", admin_menu))
     application.add_handler(CommandHandler("menu", admin_menu))
 
     # Обработчики сообщений и кнопок
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Запуск вебхука
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path="webhook",
-        webhook_url=f"{WEBHOOK_URL}/webhook"
-    )
+    # Запуск long polling
+    logger.info("Бот запущен")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
