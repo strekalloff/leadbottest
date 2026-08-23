@@ -75,6 +75,20 @@ def update_username(user_id, manager_code, username):
             )
         conn.commit()
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    manager_code = context.args[0] if context.args else "unknown"
+
+    add_lead(...)
+
+    await notify_admin(context.bot, manager_code, user)
+
+    # Вот здесь происходит показ клавиатуры для администратора
+    await maybe_show_reply_keyboard(update, context)
+
+    await update.message.reply_text(...)
+    # далее остальной код
+
 # --- Вспомогательные функции для отчётов ---
 def get_all_leads():
     with get_conn() as conn:
