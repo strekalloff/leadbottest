@@ -325,11 +325,11 @@ def main():
     application.add_handler(CommandHandler("export", admin_menu))
     application.add_handler(CommandHandler("menu", admin_menu))
 
+    # Обработчик reply-кнопки "Меню" ДОЛЖЕН быть перед общим обработчиком текста
+    application.add_handler(MessageHandler(filters.Text(["Меню"]), handle_reply_menu))
+
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
     application.add_handler(CallbackQueryHandler(button_handler))
-
-    # Обработчик нажатия на reply-кнопку "Меню"
-    application.add_handler(MessageHandler(filters.Text(["Меню"]), handle_reply_menu))
 
     threading.Thread(target=run_flask, daemon=True).start()
 
