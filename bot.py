@@ -3,6 +3,7 @@ import logging
 import csv
 import io
 import threading
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
@@ -14,8 +15,8 @@ from telegram.ext import (
 )
 import psycopg2
 import psycopg2.extras
-from datetime import datetime
 from flask import Flask
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -42,6 +43,7 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # Таблица лидов
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS leads (
                     id SERIAL PRIMARY KEY,
@@ -50,6 +52,16 @@ def init_db():
                     username TEXT,
                     first_name TEXT,
                     last_name TEXT,
+                    timestamp TEXT
+                )
+            ''')
+            # Таблица логов действий
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS action_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    action TEXT,
+                    details TEXT,
                     timestamp TEXT
                 )
             ''')
@@ -72,6 +84,17 @@ def update_username(user_id, manager_code, username):
             cur.execute(
                 "UPDATE leads SET username = %s WHERE user_id = %s AND manager_code = %s AND username IS NULL",
                 (username, user_id, manager_code)
+            )
+        conn.commit()
+
+def log_action(user_id, action, details=""):
+    """Записывает действие в таблицу логов."""
+    timestamp = datetime.now().isoformat()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO action_logs (user_id, action, details, timestamp) VALUES (%s, %s, %s, %s)",
+                (user_id, action, details, timestamp)
             )
         conn.commit()
 
@@ -107,8 +130,10 @@ async def notify_admin(bot, manager_code, user):
 
 # --- Клавиатура администратора ---
 def get_admin_reply_keyboard():
-    """Создаёт reply-клавиатуру с кнопкой 'Меню'."""
-    keyboard = [[KeyboardButton("Меню")]]
+    """Создаёт reply-клавиатуру с кнопками 'Меню' и 'Логи'."""
+    keyboard = [
+        [KeyboardButton("Меню"), KeyboardButton("Логи")]
+    ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 async def maybe_show_reply_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -117,7 +142,7 @@ async def maybe_show_reply_keyboard(update: Update, context: ContextTypes.DEFAUL
         if not context.user_data.get('reply_keyboard_shown'):
             reply_keyboard = get_admin_reply_keyboard()
             await update.message.reply_text(
-                "Клавиатура администратора активирована. Нажмите кнопку «Меню» внизу.",
+                "Клавиатура администратора активирована. Используйте кнопки «Меню» и «Логи».",
                 reply_markup=reply_keyboard
             )
             context.user_data['reply_keyboard_shown'] = True
@@ -134,6 +159,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         first_name=user.first_name,
         last_name=user.last_name
     )
+
+    log_action(user.id, "new_lead", f"manager={manager_code}")
 
     await notify_admin(context.bot, manager_code, user)
 
@@ -168,6 +195,8 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         update_username(user.id, manager_code, username)
 
+        log_action(user.id, "username_updated", f"username={username}, manager={manager_code}")
+
         await update.message.reply_text(f"Отлично! Ваш username @{username} сохранён.")
         await send_channel_invite(update, context)
         context.user_data['awaiting_username'] = False
@@ -185,6 +214,7 @@ async def send_channel_invite(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --- Команды администратора ---
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
+        log_action(update.effective_user.id, "unauthorized_access", "Tried to access admin menu")
         await update.message.reply_text("У вас нет доступа.")
         return
 
@@ -207,14 +237,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.from_user.id != ADMIN_ID:
+        log_action(query.from_user.id, "unauthorized_access", "Tried to use inline button")
         await query.edit_message_text("У вас нет доступа.")
         return
 
     data = query.data
 
     if data == "export_csv":
+        log_action(query.from_user.id, "export_csv", "CSV export requested")
         await export_csv(update, context)
     elif data == "export_leads":
+        log_action(query.from_user.id, "export_leads_text", "Text report requested")
         await export_leads_text(update, context)
     elif data == "confirm_clear":
         await confirm_clear(update, context)
@@ -227,6 +260,14 @@ async def handle_reply_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
         await show_inline_menu(update, context)
     else:
+        log_action(update.effective_user.id, "unauthorized_access", "Tried to use reply menu button")
+        await update.message.reply_text("У вас нет доступа.")
+
+async def handle_reply_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == ADMIN_ID:
+        await logs_command(update, context)
+    else:
+        log_action(update.effective_user.id, "unauthorized_access", "Tried to use reply logs button")
         await update.message.reply_text("У вас нет доступа.")
 
 async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -306,10 +347,63 @@ async def execute_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("TRUNCATE TABLE leads RESTART IDENTITY")
         conn.commit()
 
+    log_action(update.effective_user.id, "clear_database", "All leads deleted")
+
     if update.callback_query:
         await update.callback_query.message.reply_text("База данных очищена.")
     else:
         await update.message.reply_text("База данных очищена.")
+
+# --- Команда /logs ---
+async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        log_action(update.effective_user.id, "unauthorized_access", "Tried to view logs")
+        await update.message.reply_text("У вас нет доступа.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT user_id, action, details, timestamp FROM action_logs ORDER BY id DESC LIMIT 50")
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("Логов пока нет.")
+        return
+
+    text = "📋 Последние действия:\n\n"
+    for row in rows:
+        text += f"🕒 {row['timestamp']}\n"
+        text += f"👤 User ID: {row['user_id']}\n"
+        text += f"🔹 Действие: {row['action']}\n"
+        text += f"📝 Детали: {row['details']}\n\n"
+
+    await update.message.reply_text(text)
+
+# --- Ежедневный бэкап ---
+async def daily_backup(application: Application):
+    """Отправляет CSV-файл администратору."""
+    try:
+        leads = get_all_leads()
+        if not leads:
+            logger.info("Нет данных для бэкапа")
+            return
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Менеджер", "User ID", "Username", "Имя", "Фамилия", "Время"])
+        for lead in leads:
+            writer.writerow([lead['manager_code'], lead['user_id'], lead['username'],
+                             lead['first_name'], lead['last_name'], lead['timestamp']])
+        csv_data = output.getvalue()
+        await application.bot.send_document(
+            chat_id=ADMIN_ID,
+            document=io.BytesIO(csv_data.encode('utf-8-sig')),
+            filename=f"leads_backup_{datetime.now().strftime('%Y-%m-%d')}.csv",
+            caption="Ежедневный бэкап данных"
+        )
+        log_action(ADMIN_ID, "daily_backup", "Backup sent")
+        logger.info("Ежедневный бэкап отправлен")
+    except Exception as e:
+        logger.error(f"Ошибка при бэкапе: {e}")
 
 # --- Запуск Flask в отдельном потоке ---
 def run_flask():
@@ -320,18 +414,27 @@ def main():
     init_db()
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("export", admin_menu))
     application.add_handler(CommandHandler("menu", admin_menu))
+    application.add_handler(CommandHandler("logs", logs_command))
 
-    # Обработчик reply-кнопки "Меню" ДОЛЖЕН быть перед общим обработчиком текста
+    # Обработчики reply-кнопок (должны быть перед общим обработчиком текста)
     application.add_handler(MessageHandler(filters.Text(["Меню"]), handle_reply_menu))
+    application.add_handler(MessageHandler(filters.Text(["Логи"]), handle_reply_logs))
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
     application.add_handler(CallbackQueryHandler(button_handler))
 
+    # Запуск Flask
     threading.Thread(target=run_flask, daemon=True).start()
+
+    # Запуск планировщика ежедневного бэкапа
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(lambda: daily_backup(application), 'interval', hours=24)
+    scheduler.start()
 
     logger.info("Бот запущен")
     application.run_polling()
