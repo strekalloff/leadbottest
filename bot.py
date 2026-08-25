@@ -176,13 +176,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await notify_admin(context.bot, manager_code, user)
 
-    # Для администратора: показываем reply-клавиатуру и сообщение
     if user.id == ADMIN_ID:
         await maybe_show_reply_keyboard(update, context)
         await update.message.reply_text("Вы администратор. Используйте кнопку «Меню» или команду /admin для управления.")
         return
 
-    # Для обычного пользователя: запускаем анкету
     if user.username:
         await send_channel_invite(update, context)
         await ask_beds(update, context)
@@ -281,7 +279,6 @@ async def handle_floors_callback(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=reply_markup
     )
 
-    # Отправляем сводку администратору
     user = query.from_user
     manager_code = context.user_data.get('manager_code', 'unknown')
     beds = context.user_data.get('beds_choice', 'не указано')
@@ -301,9 +298,20 @@ async def handle_floors_callback(update: Update, context: ContextTypes.DEFAULT_T
         await context.bot.send_message(chat_id=ADMIN_ID, text=summary)
 
 # --- Админ-панель для ссылок ---
-async def links_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("У вас нет доступа.")
+async def links_settings(update_or_query, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает меню выбора ссылки для замены."""
+    # Определяем, пришёл ли вызов из callback-кнопки или из обычной команды
+    if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query is not None:
+        query = update_or_query.callback_query
+        await query.answer()
+        message = query.message
+        user_id = query.from_user.id
+    else:
+        message = update_or_query.message
+        user_id = update_or_query.effective_user.id
+
+    if user_id != ADMIN_ID:
+        await message.reply_text("У вас нет доступа.")
         return
 
     keyboard = [
@@ -313,7 +321,7 @@ async def links_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Менеджер", callback_data="edit_links_manager")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
+    await message.reply_text(
         "Выберите ссылку для замены:",
         reply_markup=reply_markup
     )
@@ -390,7 +398,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "cancel_clear":
         await query.edit_message_text("Операция отменена.")
     elif data == "links_settings":
-        await links_settings(update, context)
+        # Передаём query, чтобы функция могла корректно обработать
+        await links_settings(query, context)
     elif data.startswith("edit_links_"):
         await handle_edit_link_callback(update, context)
 
