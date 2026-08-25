@@ -176,13 +176,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await notify_admin(context.bot, manager_code, user)
 
-    await maybe_show_reply_keyboard(update, context)
-
     if user.id == ADMIN_ID:
-        # Администратору анкету не показываем
-        await update.message.reply_text("Вы администратор. Анкета не требуется.")
+        # Для администратора сразу показываем меню настройки ссылок
+        await links_settings(update, context)
         return
 
+    # Для обычного пользователя
     if user.username:
         await send_channel_invite(update, context)
         await ask_beds(update, context)
@@ -228,7 +227,6 @@ async def send_channel_invite(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # --- Анкета (вопросы) ---
 async def ask_beds(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет первый вопрос: количество спален."""
     keyboard = [
         [InlineKeyboardButton("2", callback_data="beds_2"),
          InlineKeyboardButton("3", callback_data="beds_3"),
