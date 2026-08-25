@@ -176,12 +176,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await notify_admin(context.bot, manager_code, user)
 
+    # Для администратора: показываем reply-клавиатуру и сообщение
     if user.id == ADMIN_ID:
-        # Для администратора сразу показываем меню настройки ссылок
-        await links_settings(update, context)
+        await maybe_show_reply_keyboard(update, context)
+        await update.message.reply_text("Вы администратор. Используйте кнопку «Меню» или команду /admin для управления.")
         return
 
-    # Для обычного пользователя
+    # Для обычного пользователя: запускаем анкету
     if user.username:
         await send_channel_invite(update, context)
         await ask_beds(update, context)
@@ -213,7 +214,6 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data['awaiting_username'] = False
     else:
-        # Если админ ожидает ввод новой ссылки
         if update.effective_user.id == ADMIN_ID and context.user_data.get('awaiting_link_for'):
             await handle_new_link(update, context)
 
