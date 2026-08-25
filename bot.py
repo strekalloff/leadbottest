@@ -182,18 +182,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Вы администратор. Используйте кнопку «Меню» или команду /admin для управления.")
         return
 
-    # Для обычного пользователя
+    # Для обычного пользователя: сначала приветствие
+    await update.message.reply_text(
+        f"Привет, {user.first_name}! 👋\n"
+        "Спасибо, что перешли по ссылке.\n"
+        "Чтобы мы могли связаться с вами, нам нужен ваш Telegram username."
+    )
+
+    # Затем действия в зависимости от наличия username
     if user.username:
-        # Если username уже есть, сразу приглашаем в канал и запускаем анкету
         await send_channel_invite(update, context)
         await ask_beds(update, context)
     else:
-        # Если username нет, сначала запрашиваем его
-        await update.message.reply_text(
-            f"Привет, {user.first_name}! 👋\n"
-            "Спасибо, что перешли по ссылке.\n"
-            "Чтобы мы могли связаться с вами, нам нужен ваш Telegram username."
-        )
         await update.message.reply_text(
             "Пожалуйста, отправьте ваш @username (например, @ivan_petrov) одним сообщением."
         )
@@ -310,7 +310,6 @@ async def handle_floors_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 # --- Админ-панель для ссылок ---
 async def links_settings(update_or_query, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает меню выбора ссылки для замены."""
     if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query is not None:
         query = update_or_query.callback_query
         await query.answer()
