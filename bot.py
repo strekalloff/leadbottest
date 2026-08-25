@@ -176,15 +176,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await notify_admin(context.bot, manager_code, user)
 
+    # Ветвление для администратора
     if user.id == ADMIN_ID:
         await maybe_show_reply_keyboard(update, context)
         await update.message.reply_text("Вы администратор. Используйте кнопку «Меню» или команду /admin для управления.")
         return
 
+    # Для обычного пользователя
     if user.username:
+        # Если username уже есть, сразу приглашаем в канал и запускаем анкету
         await send_channel_invite(update, context)
         await ask_beds(update, context)
     else:
+        # Если username нет, сначала запрашиваем его
+        await update.message.reply_text(
+            f"Привет, {user.first_name}! 👋\n"
+            "Спасибо, что перешли по ссылке.\n"
+            "Чтобы мы могли связаться с вами, нам нужен ваш Telegram username."
+        )
         await update.message.reply_text(
             "Пожалуйста, отправьте ваш @username (например, @ivan_petrov) одним сообщением."
         )
@@ -192,6 +201,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['manager_code'] = manager_code
 
 async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Показываем клавиатуру, если админ
     await maybe_show_reply_keyboard(update, context)
 
     if context.user_data.get('awaiting_username'):
@@ -212,6 +222,7 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data['awaiting_username'] = False
     else:
+        # Если админ ожидает ввод новой ссылки
         if update.effective_user.id == ADMIN_ID and context.user_data.get('awaiting_link_for'):
             await handle_new_link(update, context)
 
@@ -300,7 +311,6 @@ async def handle_floors_callback(update: Update, context: ContextTypes.DEFAULT_T
 # --- Админ-панель для ссылок ---
 async def links_settings(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     """Показывает меню выбора ссылки для замены."""
-    # Определяем, пришёл ли вызов из callback-кнопки или из обычной команды
     if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query is not None:
         query = update_or_query.callback_query
         await query.answer()
@@ -398,7 +408,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "cancel_clear":
         await query.edit_message_text("Операция отменена.")
     elif data == "links_settings":
-        # Передаём query, чтобы функция могла корректно обработать
         await links_settings(query, context)
     elif data.startswith("edit_links_"):
         await handle_edit_link_callback(update, context)
