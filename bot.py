@@ -26,7 +26,6 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", 8080))
 
-# Дефолтные ссылки (если не заданы в БД или переменных окружения)
 DEFAULT_LINKS = {
     "houses": "https://example.com/sale",
     "projects": "https://example.com/projects",
@@ -52,7 +51,6 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            # Таблица лидов
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS leads (
                     id SERIAL PRIMARY KEY,
@@ -64,7 +62,6 @@ def init_db():
                     timestamp TEXT
                 )
             ''')
-            # Таблица ссылок
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS links (
                     key TEXT PRIMARY KEY,
@@ -72,7 +69,6 @@ def init_db():
                 )
             ''')
         conn.commit()
-    # Заполняем ссылками по умолчанию, если таблица пуста
     with get_conn() as conn:
         with conn.cursor() as cur:
             for key, url in DEFAULT_LINKS.items():
@@ -182,15 +178,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await maybe_show_reply_keyboard(update, context)
 
-    await update.message.reply_text(
-        f"Привет, {user.first_name}! 👋\n"
-        "Спасибо, что перешли по ссылке.\n"
-        "Чтобы мы могли связаться с вами, нам нужен ваш Telegram username."
-    )
+    if user.id == ADMIN_ID:
+        # Администратору анкету не показываем
+        await update.message.reply_text("Вы администратор. Анкета не требуется.")
+        return
 
     if user.username:
         await send_channel_invite(update, context)
-        # Запускаем анкету сразу после кнопки канала
         await ask_beds(update, context)
     else:
         await update.message.reply_text(
@@ -214,16 +208,15 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(f"Отлично! Ваш username @{username} сохранён.")
         await send_channel_invite(update, context)
-        # Запускаем анкету после сохранения username
-        await ask_beds(update, context)
+
+        if user.id != ADMIN_ID:
+            await ask_beds(update, context)
 
         context.user_data['awaiting_username'] = False
     else:
-        # Если сообщение не ожидалось, но это админ и он хочет настроить ссылки
+        # Если админ ожидает ввод новой ссылки
         if update.effective_user.id == ADMIN_ID and context.user_data.get('awaiting_link_for'):
             await handle_new_link(update, context)
-        else:
-            pass
 
 async def send_channel_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("📢 Перейти в канал", url=CHANNEL_LINK)]]
@@ -251,10 +244,9 @@ async def ask_beds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_beds_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    beds_choice = query.data  # например, "beds_3"
+    beds_choice = query.data
     context.user_data['beds_choice'] = beds_choice
 
-    # Редактируем сообщение на вопрос про этажи
     keyboard = [
         [InlineKeyboardButton("1", callback_data="floors_1"),
          InlineKeyboardButton("2", callback_data="floors_2"),
@@ -269,10 +261,9 @@ async def handle_beds_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_floors_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    floors_choice = query.data  # например, "floors_2"
+    floors_choice = query.data
     context.user_data['floors_choice'] = floors_choice
 
-    # Получаем ссылки из БД
     links = {
         "houses": get_link("houses"),
         "projects": get_link("projects"),
@@ -280,7 +271,6 @@ async def handle_floors_callback(update: Update, context: ContextTypes.DEFAULT_T
         "manager": get_link("manager")
     }
 
-    # Формируем финальное меню
     keyboard = [
         [InlineKeyboardButton("ДОМА В ПРОДАЖЕ", url=links["houses"])],
         [InlineKeyboardButton("ТИПОВЫЕ ПРОЕКТЫ", url=links["projects"])],
@@ -314,7 +304,6 @@ async def handle_floors_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 # --- Админ-панель для ссылок ---
 async def links_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает список ссылок для редактирования."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("У вас нет доступа.")
         return
@@ -338,8 +327,7 @@ async def handle_edit_link_callback(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text("У вас нет доступа.")
         return
 
-    # Определяем ключ ссылки из callback_data
-    data = query.data  # например, "edit_links_houses"
+    data = query.data
     key = data.replace("edit_links_", "")
     context.user_data['awaiting_link_for'] = key
 
@@ -348,7 +336,6 @@ async def handle_edit_link_callback(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def handle_new_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Принимает новую ссылку от админа."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("У вас нет доступа.")
         return
@@ -535,28 +522,22 @@ def main():
     init_db()
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("export", admin_menu))
     application.add_handler(CommandHandler("menu", admin_menu))
     application.add_handler(CommandHandler("links", links_settings))
 
-    # Обработчики reply-кнопок (перед общим текстовым)
     application.add_handler(MessageHandler(filters.Text(["Меню"]), handle_reply_menu))
 
-    # Обработчики текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
 
-    # Обработчики callback-кнопок
     application.add_handler(CallbackQueryHandler(handle_beds_callback, pattern="^beds_"))
     application.add_handler(CallbackQueryHandler(handle_floors_callback, pattern="^floors_"))
-    application.add_handler(CallbackQueryHandler(button_handler))  # общий для админки
+    application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Запуск Flask
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Планировщик ежедневного бэкапа в 03:20 UTC+2
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         lambda: backup_job(application),
