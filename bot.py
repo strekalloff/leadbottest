@@ -26,7 +26,15 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", 8080))
 
-# --- Логирование (стандартный Python logging) ---
+# Дефолтные ссылки (если не заданы в БД или переменных окружения)
+DEFAULT_LINKS = {
+    "houses": "https://example.com/sale",
+    "projects": "https://example.com/projects",
+    "kalinov": "https://example.com/kalinov",
+    "manager": "https://t.me/username_manager"
+}
+
+# --- Логирование ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -44,6 +52,7 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # Таблица лидов
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS leads (
                     id SERIAL PRIMARY KEY,
@@ -55,6 +64,40 @@ def init_db():
                     timestamp TEXT
                 )
             ''')
+            # Таблица ссылок
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS links (
+                    key TEXT PRIMARY KEY,
+                    url TEXT NOT NULL
+                )
+            ''')
+        conn.commit()
+    # Заполняем ссылками по умолчанию, если таблица пуста
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for key, url in DEFAULT_LINKS.items():
+                cur.execute("""
+                    INSERT INTO links (key, url)
+                    VALUES (%s, %s)
+                    ON CONFLICT (key) DO NOTHING
+                """, (key, url))
+        conn.commit()
+
+def get_link(key):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT url FROM links WHERE key = %s", (key,))
+            row = cur.fetchone()
+            return row[0] if row else DEFAULT_LINKS.get(key)
+
+def set_link(key, url):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO links (key, url)
+                VALUES (%s, %s)
+                ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url
+            """, (key, url))
         conn.commit()
 
 def add_lead(manager_code, user_id, username, first_name, last_name):
@@ -107,14 +150,12 @@ async def notify_admin(bot, manager_code, user):
                  f"Username: @{user.username if user.username else 'не указан'}"
         )
 
-# --- Клавиатура администратора ---
+# --- Клавиатура администратора (reply) ---
 def get_admin_reply_keyboard():
-    """Создаёт reply-клавиатуру с кнопкой 'Меню'."""
     keyboard = [[KeyboardButton("Меню")]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 async def maybe_show_reply_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает reply-клавиатуру администратору, если её ещё нет."""
     if update.effective_user.id == ADMIN_ID:
         if not context.user_data.get('reply_keyboard_shown'):
             reply_keyboard = get_admin_reply_keyboard()
@@ -124,7 +165,7 @@ async def maybe_show_reply_keyboard(update: Update, context: ContextTypes.DEFAUL
             )
             context.user_data['reply_keyboard_shown'] = True
 
-# --- Обработчики команд ---
+# --- Обработчик команды /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     manager_code = context.args[0] if context.args else "unknown"
@@ -139,7 +180,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await notify_admin(context.bot, manager_code, user)
 
-    # Показываем reply-клавиатуру, если это админ
     await maybe_show_reply_keyboard(update, context)
 
     await update.message.reply_text(
@@ -150,6 +190,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user.username:
         await send_channel_invite(update, context)
+        # Запускаем анкету сразу после кнопки канала
+        await ask_beds(update, context)
     else:
         await update.message.reply_text(
             "Пожалуйста, отправьте ваш @username (например, @ivan_petrov) одним сообщением."
@@ -172,9 +214,16 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(f"Отлично! Ваш username @{username} сохранён.")
         await send_channel_invite(update, context)
+        # Запускаем анкету после сохранения username
+        await ask_beds(update, context)
+
         context.user_data['awaiting_username'] = False
     else:
-        pass
+        # Если сообщение не ожидалось, но это админ и он хочет настроить ссылки
+        if update.effective_user.id == ADMIN_ID and context.user_data.get('awaiting_link_for'):
+            await handle_new_link(update, context)
+        else:
+            pass
 
 async def send_channel_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("📢 Перейти в канал", url=CHANNEL_LINK)]]
@@ -184,7 +233,137 @@ async def send_channel_invite(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=reply_markup
     )
 
-# --- Команды администратора ---
+# --- Анкета (вопросы) ---
+async def ask_beds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет первый вопрос: количество спален."""
+    keyboard = [
+        [InlineKeyboardButton("2", callback_data="beds_2"),
+         InlineKeyboardButton("3", callback_data="beds_3"),
+         InlineKeyboardButton("4", callback_data="beds_4"),
+         InlineKeyboardButton("5 и более", callback_data="beds_5+")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Сколько спален вы хотите?",
+        reply_markup=reply_markup
+    )
+
+async def handle_beds_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    beds_choice = query.data  # например, "beds_3"
+    context.user_data['beds_choice'] = beds_choice
+
+    # Редактируем сообщение на вопрос про этажи
+    keyboard = [
+        [InlineKeyboardButton("1", callback_data="floors_1"),
+         InlineKeyboardButton("2", callback_data="floors_2"),
+         InlineKeyboardButton("3", callback_data="floors_3")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        "Сколько вам нужно этажей?",
+        reply_markup=reply_markup
+    )
+
+async def handle_floors_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    floors_choice = query.data  # например, "floors_2"
+    context.user_data['floors_choice'] = floors_choice
+
+    # Получаем ссылки из БД
+    links = {
+        "houses": get_link("houses"),
+        "projects": get_link("projects"),
+        "kalinov": get_link("kalinov"),
+        "manager": get_link("manager")
+    }
+
+    # Формируем финальное меню
+    keyboard = [
+        [InlineKeyboardButton("ДОМА В ПРОДАЖЕ", url=links["houses"])],
+        [InlineKeyboardButton("ТИПОВЫЕ ПРОЕКТЫ", url=links["projects"])],
+        [InlineKeyboardButton("КАЛИНОВ ПАРК", url=links["kalinov"])],
+        [InlineKeyboardButton("ПЕРСОНАЛЬНЫЙ МЕНЕДЖЕР", url=links["manager"])]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        "Выберите категорию для просмотра:",
+        reply_markup=reply_markup
+    )
+
+    # Отправляем сводку администратору
+    user = query.from_user
+    manager_code = context.user_data.get('manager_code', 'unknown')
+    beds = context.user_data.get('beds_choice', 'не указано')
+    floors = context.user_data.get('floors_choice', 'не указано')
+    username = user.username if user.username else "не указан"
+    time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    summary = (
+        f"📋 Описание заявки\n"
+        f"Username: @{username}\n"
+        f"Менеджер: {manager_code}\n"
+        f"Время: {time_now}\n"
+        f"Спальни: {beds.replace('beds_', '') if beds != 'beds_5+' else '5+'}\n"
+        f"Этажи: {floors.replace('floors_', '')}"
+    )
+    if ADMIN_ID:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=summary)
+
+# --- Админ-панель для ссылок ---
+async def links_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает список ссылок для редактирования."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("У вас нет доступа.")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("Дома в продаже", callback_data="edit_links_houses")],
+        [InlineKeyboardButton("Типовые проекты", callback_data="edit_links_projects")],
+        [InlineKeyboardButton("Калинов парк", callback_data="edit_links_kalinov")],
+        [InlineKeyboardButton("Менеджер", callback_data="edit_links_manager")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Выберите ссылку для замены:",
+        reply_markup=reply_markup
+    )
+
+async def handle_edit_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id != ADMIN_ID:
+        await query.edit_message_text("У вас нет доступа.")
+        return
+
+    # Определяем ключ ссылки из callback_data
+    data = query.data  # например, "edit_links_houses"
+    key = data.replace("edit_links_", "")
+    context.user_data['awaiting_link_for'] = key
+
+    await query.edit_message_text(
+        f"Отправьте новую ссылку для '{key}' (например, https://...):"
+    )
+
+async def handle_new_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принимает новую ссылку от админа."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("У вас нет доступа.")
+        return
+
+    key = context.user_data.get('awaiting_link_for')
+    if not key:
+        return
+
+    new_url = update.message.text.strip()
+    set_link(key, new_url)
+    context.user_data.pop('awaiting_link_for', None)
+
+    await update.message.reply_text(f"Ссылка для '{key}' обновлена на:\n{new_url}")
+
+# --- Команды администратора (меню) ---
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("У вас нет доступа.")
@@ -197,6 +376,7 @@ async def show_inline_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Экспорт CSV", callback_data="export_csv")],
         [InlineKeyboardButton("📋 Экспорт лидов (текст)", callback_data="export_leads")],
         [InlineKeyboardButton("🗑 Очистить базу данных", callback_data="confirm_clear")],
+        [InlineKeyboardButton("🔗 Настройки ссылок", callback_data="links_settings")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -224,13 +404,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await execute_clear(update, context)
     elif data == "cancel_clear":
         await query.edit_message_text("Операция отменена.")
+    elif data == "links_settings":
+        await links_settings(update, context)
+    elif data.startswith("edit_links_"):
+        await handle_edit_link_callback(update, context)
 
+# --- Обработчик reply-кнопок ---
 async def handle_reply_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
         await show_inline_menu(update, context)
     else:
         await update.message.reply_text("У вас нет доступа.")
 
+# --- Экспорт и очистка (как раньше) ---
 async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     leads = get_all_leads()
     if not leads:
@@ -315,7 +501,6 @@ async def execute_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Ежедневный бэкап ---
 async def daily_backup(application: Application):
-    """Отправляет CSV-файл администратору."""
     try:
         leads = get_all_leads()
         if not leads:
@@ -339,7 +524,6 @@ async def daily_backup(application: Application):
         logger.error(f"Ошибка при бэкапе: {e}")
 
 def backup_job(application):
-    """Синхронная обёртка для запуска асинхронной daily_backup."""
     asyncio.run(daily_backup(application))
 
 # --- Запуск Flask в отдельном потоке ---
@@ -356,24 +540,30 @@ def main():
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("export", admin_menu))
     application.add_handler(CommandHandler("menu", admin_menu))
+    application.add_handler(CommandHandler("links", links_settings))
 
-    # Обработчик reply-кнопки "Меню" ДОЛЖЕН быть перед общим обработчиком текста
+    # Обработчики reply-кнопок (перед общим текстовым)
     application.add_handler(MessageHandler(filters.Text(["Меню"]), handle_reply_menu))
 
+    # Обработчики текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
-    application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Запуск Flask в отдельном потоке
+    # Обработчики callback-кнопок
+    application.add_handler(CallbackQueryHandler(handle_beds_callback, pattern="^beds_"))
+    application.add_handler(CallbackQueryHandler(handle_floors_callback, pattern="^floors_"))
+    application.add_handler(CallbackQueryHandler(button_handler))  # общий для админки
+
+    # Запуск Flask
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Запуск планировщика ежедневного бэкапа
+    # Планировщик ежедневного бэкапа в 03:20 UTC+2
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         lambda: backup_job(application),
         'cron',
         hour=3,
         minute=20,
-        timezone="Etc/GMT-2"  # фиксированный UTC+2
+        timezone="Etc/GMT-2"
     )
     scheduler.start()
 
